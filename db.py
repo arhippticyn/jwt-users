@@ -21,7 +21,9 @@ class Users(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(50))
     email: Mapped[str] = mapped_column(unique=True)
-    password: Mapped[str] = mapped_column()
+    password: Mapped[str | None] = mapped_column(nullable=True)
+    google_id: Mapped[str] = mapped_column(nullable=True)
+    github_id: Mapped[str] = mapped_column(nullable=True)
     
 def get_db():
     db = Session()
