@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm, HTTPBearer, HTTPAuthorizationCredentials
 from jwt.exceptions import InvalidTokenError
 import jwt 
 from datetime import datetime, timedelta, timezone
@@ -15,6 +15,8 @@ load_dotenv()
 
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
+GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
+GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
 
 
 SECRET_KEY = "09d25e094faa6ca2556c818166b7a9563b93f7099f6f8f4caa6cf63b88e8d3e7"
@@ -23,7 +25,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 app = FastAPI()
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl='token')
+# oauth2_scheme = OAuth2PasswordBearer(tokenUrl='token')
+security = HTTPBearer()
 password_hash = PasswordHash.recommended()
 
 def hashed_password(password):
@@ -37,8 +40,14 @@ def verify_password(plain_password, hashed_password):
 async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(Users).filter(Users.username == form_data.username).first()
     
-    if not user or not verify_password(form_data.password, user.password):
+    if not user:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='invalid creditials')
+    
+    if user.password is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='user google or github login')
+    
+    if not verify_password(form_data.password, user.password):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=' or not verify_password(form_data.password, user.password)')
     
     payload = {
         'sub': user.username,
@@ -70,9 +79,11 @@ async def register(user: CreateUser, db: Session = Depends(get_db)):
     return new_user
 
 
-async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> Users:
-    creditials_exception = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},)
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)) -> Users:
+    # creditials_exception = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials",
+    #     headers={"WWW-Authenticate": "Bearer"},)
+
+    token = credentials.credentials
     
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITM])
@@ -96,45 +107,63 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
 def read_user(user: Users = Depends(get_current_user)):
     return user
 
-# @app.get('/auth/google/login')
-# async def google_login():
-#     return {
-#         'url': 'https://accounts.google.com/o/oauth2/v2/auth'
-#         "?client_id=GOOGLE_CLIENT_ID"
-#         "&redirect_uri=http://localhost:8000/auth/google/callback"
-#         "&response_type=code"
-#         "&scope=openid email profile"
-#     }
+@app.get('/auth/google/login')
+async def google_login():
+    return {
+        "url": (
+            "https://accounts.google.com/o/oauth2/v2/auth"
+            f"?client_id={GOOGLE_CLIENT_ID}"
+            "&redirect_uri=http://localhost:8000/auth/google/callback"
+            "&response_type=code"
+            "&scope=openid email profile"
+        )
+    }
 
-# @app.get('/auth/google/callback')
-# async def google_callback(code: str, db: Session = Depends(get_db)):
-#     google_token = '... получаешь через requests ...'
+@app.get('/auth/google/callback')
+async def google_callback(code: str, db: Session = Depends(get_db)):
+    token_response = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "code": code,
+            "grant_type": "authorization_code",
+            "redirect_uri": "http://localhost:8000/auth/google/callback",
+        },
+    )
 
-#     hashed_google_password = hashed_password()
+    access_token = token_response.json().get('access_token')
 
-#     google_user = {
-#         'id': 12312,
-#         'username': 'Google test',
-#         'email': 'test@gmail.com',
-#         'password': None
-#     }
+    if not access_token:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Gooogle token error')
 
-#     user = db.query(Users).filter(Users.google_id == google_user['id']).first()
+    user_info = requests.get(
+        "https://www.googleapis.com/oauth2/v2/userinfo",
+        headers={"Authorization": f"Bearer {access_token}"},
+    ).json()
 
-#     if not user: 
-#         user = Users(username=google_user['username'], email=google_user['email'], password=google_user['password'], google_id=google_user['id'])
-#         db.add(user)
-#         db.commit()
-#         db.refresh(user)
+    google_id = user_info['id']
+    google_email = user_info['email']
+    google_username = user_info.get('name', google_email.split('@')[0])
 
-#     payload = {
-#         'sub': user.username,
-#         'exp': datetime.now(timezone.utc) + timedelta(ACCESS_TOKEN_EXPIRE_MINUTES)
-#     }
+    user = db.query(Users).filter(Users.google_id == google_id).first()
 
-#     access_token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITM)
+    if not user:
+        user = Users(username=google_username, email=google_email, password=None, google_id=google_id)
+        db.add(user)
+        db.commit()
+        db.refresh(user)
 
-#     return {'access_token': access_token, 'type': 'bearer'}
+    payload = {
+        'sub': user.username,
+        'exp': datetime.now(timezone.utc) + timedelta(ACCESS_TOKEN_EXPIRE_MINUTES)
+    }
+
+    access_token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITM)
+
+    return {'access_token': access_token, 'type': 'bearer'}
+
+   
 
 @app.get('/auth/github/login')
 async def github_login():
